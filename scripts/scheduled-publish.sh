@@ -4,7 +4,7 @@
 
 set -euo pipefail
 
-TODAY=$(date +%Y-%m-%d)
+TODAY=$(TZ=Asia/Tokyo date +%Y-%m-%d)
 echo "📅 Today: $TODAY"
 
 PUBLISHED=0
