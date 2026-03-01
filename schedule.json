@@ -1,0 +1,19 @@
+{
+  "description": "Qiita記事の予約投稿スケジュール。publish_date の朝7時(JST)に自動公開される。",
+  "articles": [
+    { "file": "article-04-qiita.md", "publish_date": "2026-03-02", "title": "テスト不足でデグレ11回。Double-Loop TDD" },
+    { "file": "article-02-qiita.md", "publish_date": "2026-03-09", "title": "AI生成コードを「読む技術」" },
+    { "file": "article-06-qiita.md", "publish_date": "2026-03-16", "title": "仕様書がないコードをAIに読ませたら" },
+    { "file": "article-entry-handoff-qiita.md", "publish_date": "2026-03-23", "title": "引き継ぎ地獄エンジニアのためのSFAD" },
+    { "file": "article-03-qiita.md", "publish_date": "2026-03-30", "title": "AIに伝わる仕様書の書き方 ― Example Mapping" },
+    { "file": "article-05-qiita.md", "publish_date": "2026-04-06", "title": "エラーを「握りつぶす」コードの見抜き方" },
+    { "file": "article-01-qiita.md", "publish_date": "2026-04-13", "title": "AIと開発して78個のバグを踏んだので全部分類した" },
+    { "file": "article-entry-solo-qiita.md", "publish_date": "2026-04-20", "title": "Claude CodeとTDDを組み合わせたら" },
+    { "file": "article-entry-zero-quality-qiita.md", "publish_date": "2026-04-27", "title": "品質基盤ゼロのチームを引き受けた新任TLへ" },
+    { "file": "article-07-qiita-digest.md", "publish_date": "2026-05-04", "title": "78バグから導いた7つの設計原則（ダイジェスト版）" },
+    { "file": "article-08-qiita-digest.md", "publish_date": "2026-05-11", "title": "SFADの全6コマンド設計思想（ダイジェスト版）" },
+    { "file": "article-09-qiita-digest.md", "publish_date": "2026-05-18", "title": "Claude Code Skillの作り方（ダイジェスト版）" },
+    { "file": "article-entry-ai-proposal-qiita.md", "publish_date": "2026-05-25", "title": "AI導入提案が通らない理由と、データで語って通す方法" },
+    { "file": "article-10-qiita.md", "publish_date": "2026-06-01", "title": "AI時代の開発ワークフロー実践ロードマップ" }
+  ]
+}

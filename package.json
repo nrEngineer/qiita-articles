@@ -1,0 +1,13 @@
+{
+  "name": "qiita-articles",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "preview": "npx qiita preview",
+    "publish": "npx qiita publish --all",
+    "publish:one": "npx qiita publish"
+  },
+  "devDependencies": {
+    "@qiita/qiita-cli": "^1.7.0"
+  }
+}

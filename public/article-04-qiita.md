@@ -1,0 +1,1136 @@
+---
+title: テスト不足でデグレ11回。Double-Loop TDDで「書いたコードが壊れない」仕組みを作る ― Python・TypeScript・Go実装比較
+tags:
+  - Python
+  - TDD
+  - bdd
+  - AI駆動開発
+  - ClaudeCode
+private: true
+updated_at: '2026-03-01T18:53:23+09:00'
+id: 41a36efa83c245d93b1d
+organization_url_name: null
+slide: false
+ignorePublish: false
+---
+
+## TL;DR
+
+- AIにリファクタリングを任せると**依存先が静かに壊れる**（11件のデグレ経験）
+- 3パターンに集約: API修正→呼び出し元破壊、共通コンポーネント変更→画面崩壊、DB変更→データ不整合
+- **Canon TDD（Kent Beck 2023）**: Red→Green→Refactorの古典を「AIとペアプロ」に適応
+- **Double-Loop TDD**: 外側ループ（受け入れテスト）+ 内側ループ（ユニットテスト）でデグレを構造的に防止
+- Python・TypeScript・Goの3言語で同じ構造のテストをコピペ可能な形で提供
+
+## この記事でできること
+
+| やりたいこと | この記事で得られるもの |
+|---|---|
+| AI開発でのデグレを防ぎたい | Double-Loop TDDの実装手順 |
+| TDDをAI開発に適応させたい | Canon TDDの具体的なワークフロー |
+| テストの書き方を言語別に知りたい | Python/TS/Goのテストコード実例 |
+| リファクタリングを安全にしたい | 受け入れテストによる回帰検出の仕組み |
+
+---
+
+リファクタリングしたら、別の画面が壊れていた。
+
+AIに任せたコード変更で、この経験を11回しました。「機能Aを直して」と依頼すると、AIは機能Aを丁寧に修正してくれます。でも、機能Aに依存していた機能B、C、Dが静かに壊れています。テストがなければ、壊れたことに気づくのは本番リリース後です。
+
+この記事では、ある業務システムのAI開発で経験した11件のデグレの実例パターンを3つの言語（Python、TypeScript、Go）で紹介し、Canon TDD（Kent Beck 2023）とDouble-Loop TDD（Freeman & Pryce）を使って「壊れない仕組み」を作る方法を解説します。
+
+## デグレ11件の実例パターン
+
+11件のデグレを分析すると、3つのパターンに集約できました。それぞれ異なる言語で起きた実例を紹介します。
+
+### パターン1: API修正 → 既存の呼び出し元が壊れた（Python例）
+
+エラーハンドリングを改善しようとして、戻り値の型を変えてしまったケースです。
+
+```python
+# 変更前: エラーをdictで返していた
+def get_contact(contact_id: str) -> dict:
+    contact = db.query(Contact).filter(Contact.id == contact_id).first()
+    if not contact:
+        return {"error": "not found"}
+    return {"data": contact.to_dict()}
+
+# 変更後: エラーを例外で投げるように改善した
+def get_contact(contact_id: str) -> dict:
+    contact = db.query(Contact).filter(Contact.id == contact_id).first()
+    if not contact:
+        raise ContactNotFoundError(contact_id)  # ← 戻り値の型が変わった
+    return {"data": contact.to_dict()}
+```
+
+この変更自体は正しい方向性です。エラーをdictで返すのは悪いパターンで、例外を投げるべきです。問題は、この関数を呼び出している別の箇所が`"error"` キーの有無でエラー判定していたことです。
+
+```python
+# 別のファイルにあった呼び出し元（AIは見ていなかった）
+def export_contact_to_csv(contact_id: str) -> str:
+    result = get_contact(contact_id)
+    if "error" in result:          # ← もう "error" キーは返ってこない
+        return f"エラー: {result['error']}"
+    contact = result["data"]
+    return f"{contact['id']},{contact['title']}"
+```
+
+変更後は`get_contact`が`ContactNotFoundError`を投げるので、`"error" in result`の条件は永遠にTrueになりません。存在しないcontact_idでこの関数が呼ばれると、`ContactNotFoundError`がcatchされずにアプリケーション全体がクラッシュします。
+
+AIは`get_contact`の修正に集中しており、`export_contact_to_csv`の存在を知りませんでした。コンテキスト窓に入っていなかったからです。
+
+### パターン2: モデル変更 → 依存する別機能が動かない（TypeScript例）
+
+フィールド名をリネームしたら、参照していた複数の場所が壊れたケースです。
+
+```typescript
+// 変更前: Contact型の定義
+interface Contact {
+  id: string;
+  subject: string;  // 件名
+  body: string;
+  status: "pending" | "in_progress" | "resolved";
+  createdAt: Date;
+}
+
+// 変更後: 命名規則を統一するためにsubject → titleに変更
+interface Contact {
+  id: string;
+  title: string;    // subject → title に変更
+  body: string;
+  status: "pending" | "in_progress" | "resolved";
+  createdAt: Date;
+}
+```
+
+TypeScriptなので型エラーが出るはずですが、問題は「型が緩い場所」が存在していたことです。
+
+```typescript
+// メール通知テンプレート（別ファイル）
+function buildNotificationEmail(contact: Record<string, unknown>): string {
+  // Record<string, unknown> で受けているので型チェックが効かない
+  return `
+    件名: ${contact.subject}
+    本文: ${contact.body}
+  `;
+}
+```
+
+```typescript
+// CSVエクスポート（さらに別ファイル）
+function exportToCSV(contacts: any[]): string {
+  // any[] で受けているので型チェックが効かない
+  return contacts
+    .map(c => `${c.id},${c.subject},${c.status}`)
+    .join("\n");
+}
+```
+
+`Record<string, unknown>`や`any`を使っている箇所では、TypeScriptのコンパイラが型の不整合を検出できません。`contact.subject`は`undefined`になり、メール通知には「件名: undefined」が表示され、CSVには「,undefined,」が出力されました。
+
+AIは型定義ファイルの修正に集中しており、`any`や`Record`で型が緩くなっている呼び出し元までは確認していませんでした。
+
+### パターン3: リファクタリング → 暗黙の前提が崩れた（Go例）
+
+日付フォーマットを統一しようとして、既存の動作を壊したケースです。
+
+```go
+// 変更前: 各所に散在していた日付フォーマット
+// handler.go
+createdAt := contact.CreatedAt.Format("2006/01/02")
+
+// exporter.go
+createdAt := contact.CreatedAt.Format("2006/01/02")
+
+// notifier.go
+createdAt := contact.CreatedAt.Format("2006/01/02")
+```
+
+```go
+// 変更後: 共通関数に集約（リファクタリング）
+// dateutil/format.go
+func FormatDate(t time.Time) string {
+    return t.Format("2006-01-02")  // ← スラッシュからハイフンに変わっている
+}
+```
+
+「統一」という指示に対して、AIはISO 8601のハイフン区切りを選びました。技術的には正しい判断です。しかし、フロントエンドのJavaScriptが`/`で`split`して年月日を取り出していました。
+
+```javascript
+// フロントエンド側（GoのAPIレスポンスを受け取る）
+const [year, month, day] = contact.createdAt.split("/");
+// 変更前: "2025/01/15" → ["2025", "01", "15"] ✅
+// 変更後: "2025-01-15" → ["2025-01-15"]        ❌ splitが機能しない
+```
+
+AIはGoのバックエンドコードの範囲で作業しており、フロントエンドのJavaScriptがスラッシュ区切りを前提にしていることを知りませんでした。
+
+---
+
+## なぜAI開発でデグレが多いのか
+
+3つのパターンに共通する構造的な原因を整理します。
+
+### コンテキスト窓の限界: AIは変更範囲外を「見ていない」
+
+AIが1回の会話で参照できるコードの量には限界があります。プロジェクトが大きくなるほど、「今修正しているファイル」と「それに依存しているファイル」の全てを同時に把握することが難しくなります。
+
+人間のエンジニアであれば、「この関数を変えたら、あっちのファイルにも影響があるな」という感覚を持っています。過去に自分が書いたコード、レビューしたコード、デバッグしたコードの記憶が、暗黙的な依存関係マップとして機能しています。
+
+AIにはその記憶がありません。指示された範囲を誠実に実装しますが、範囲外のコードは存在しないのと同じです。
+
+### 既存テストがなければ「壊してもわからない」
+
+テストがない状態でコードを変更すると、壊れたことに気づくのが遅れます。
+
+| テストがある場合 | テストがない場合 |
+|---|---|
+| 変更直後にテストが失敗する | 手動確認まで気づかない |
+| 壊れた箇所が特定できる | 「なんかおかしい」から調査開始 |
+| AIに「テストを通せ」と指示できる | AIに「壊れてない？」と聞いても確認手段がない |
+| CIで自動検出される | 本番リリース後に発覚する |
+
+テストは「壊れたことを教えてくれるセンサー」です。センサーがなければ、どんなに優秀なAIでも壊したコードを見つけられません。
+
+### これは言語の問題ではなく、テスト基盤の問題
+
+Python例でもTypeScript例でもGo例でも、デグレのパターンは同じです。言語固有の型システムがいくら強力でも（TypeScriptの例で見たように）、型が緩い場所があればすり抜けます。
+
+問題の本質は「変更の影響を検出するテストがなかった」ことであり、これはどの言語でも同じです。テスト基盤を整えることが、言語に関係なくデグレを防ぐ唯一の構造的な解決策です。
+
+言語を超えた教訓: テストがなければ、AIがどんなに正しい修正をしても「壊れていないこと」は証明できない。
+
+---
+
+## Canon TDD (Kent Beck 2023)
+
+Kent BeckはTDD（テスト駆動開発）の原著者です。2023年にCanon TDDとして改めて整理した手法は、シンプルですが強力です。
+
+### 基本サイクル
+
+```
+Canon TDD サイクル
+==================
+1. Test List を作る（テストすべき項目を列挙する）
+2. リストから1つ選ぶ
+3. Red: テストを書いて失敗させる
+4. Green: テストを通す最小限の実装をする
+5. Refactor: コードをきれいにする（テストは通ったまま）
+6. Test List を更新する（完了を記録、新たな項目を追加）
+7. リストが空になるまで2に戻る
+```
+
+重要なのは**Step 1のTest List**です。いきなりテストを書き始めるのではなく、まず「何をテストすべきか」のリストを作ります。これはExample Mappingで作ったExampleがそのまま使えます。
+
+### Python (pytest) での実装例
+
+「お問い合わせのステータスでフィルタリングする」機能をCanon TDDで実装してみます。
+
+**Step 1: Test Listを作る**
+
+```python
+# Test List
+# - [ ] ステータス「pending」で絞り込むと、pendingのcontactだけ返る
+# - [ ] ステータス「resolved」で絞り込むと、resolvedのcontactだけ返る
+# - [ ] 存在しないステータスを指定するとValueErrorが発生する
+# - [ ] ステータスを指定しないと全件返る
+```
+
+**Step 2-3: Red（テストを書いて失敗させる）**
+
+```python
+# tests/test_contact_service.py
+import pytest
+from app.services.contact_service import ContactService
+from app.models import Contact
+
+
+def test_filter_by_pending_status(db_session):
+    """pendingのcontactだけが返ること"""
+    db_session.add(Contact(id="c1", title="問い合わせ1", status="pending"))
+    db_session.add(Contact(id="c2", title="問い合わせ2", status="resolved"))
+    db_session.add(Contact(id="c3", title="問い合わせ3", status="pending"))
+    db_session.commit()
+
+    service = ContactService(db_session)
+    result = service.filter_by_status("pending")
+
+    assert len(result) == 2
+    assert all(c.status == "pending" for c in result)
+```
+
+この時点で`ContactService`は存在しないので、テストは`ImportError`で失敗します（Red）。
+
+**Step 4: Green（最小限の実装）**
+
+```python
+# app/services/contact_service.py
+from sqlalchemy.orm import Session
+from app.models import Contact
+
+
+class ContactService:
+    def __init__(self, session: Session):
+        self._session = session
+
+    def filter_by_status(self, status: str) -> list[Contact]:
+        return (
+            self._session.query(Contact)
+            .filter(Contact.status == status)
+            .all()
+        )
+```
+
+テストが通ります（Green）。
+
+**Step 5: Refactor → Step 6: Test List更新 → 次のテストへ**
+
+```python
+# Test List（更新後）
+# - [x] ステータス「pending」で絞り込むと、pendingのcontactだけ返る ✅
+# - [ ] ステータス「resolved」で絞り込むと、resolvedのcontactだけ返る
+# - [ ] 存在しないステータスを指定するとValueErrorが発生する
+# - [ ] ステータスを指定しないと全件返る
+```
+
+### TypeScript (Vitest) での実装例
+
+同じ機能をTypeScriptで実装します。
+
+**Step 1: Test List**
+
+```typescript
+// Test List
+// - [ ] ステータス "pending" で絞り込むと、pendingのcontactだけ返る
+// - [ ] ステータス "resolved" で絞り込むと、resolvedのcontactだけ返る
+// - [ ] 無効なステータスを指定するとエラーが発生する
+// - [ ] ステータスを指定しないと全件返る
+```
+
+**Step 2-3: Red**
+
+```typescript
+// tests/contactService.test.ts
+import { describe, it, expect, beforeEach } from "vitest";
+import { ContactService } from "../src/services/contactService";
+import { Contact } from "../src/models/contact";
+
+describe("ContactService.filterByStatus", () => {
+  let service: ContactService;
+  let testContacts: Contact[];
+
+  beforeEach(() => {
+    testContacts = [
+      { id: "c1", title: "問い合わせ1", status: "pending", createdAt: new Date() },
+      { id: "c2", title: "問い合わせ2", status: "resolved", createdAt: new Date() },
+      { id: "c3", title: "問い合わせ3", status: "pending", createdAt: new Date() },
+    ];
+    service = new ContactService(testContacts);
+  });
+
+  it("pendingで絞り込むとpendingのcontactだけ返る", () => {
+    const result = service.filterByStatus("pending");
+
+    expect(result).toHaveLength(2);
+    expect(result.every((c) => c.status === "pending")).toBe(true);
+  });
+});
+```
+
+**Step 4: Green**
+
+```typescript
+// src/services/contactService.ts
+import { Contact, ContactStatus } from "../models/contact";
+
+export class ContactService {
+  constructor(private contacts: Contact[]) {}
+
+  filterByStatus(status: ContactStatus): Contact[] {
+    return this.contacts.filter((c) => c.status === status);
+  }
+}
+```
+
+### Go (testing) での実装例
+
+同じ機能をGoで実装します。Goのテストはtable-driven testが標準的なイディオムです。
+
+**Step 2-3: Red**
+
+```go
+// contact_service_test.go
+package service
+
+import (
+    "testing"
+)
+
+func TestFilterByStatus(t *testing.T) {
+    contacts := []Contact{
+        {ID: "c1", Title: "問い合わせ1", Status: "pending"},
+        {ID: "c2", Title: "問い合わせ2", Status: "resolved"},
+        {ID: "c3", Title: "問い合わせ3", Status: "pending"},
+    }
+
+    tests := []struct {
+        name     string
+        status   string
+        wantLen  int
+        wantAll  string
+    }{
+        {
+            name:    "pendingで絞り込むとpendingだけ返る",
+            status:  "pending",
+            wantLen: 2,
+            wantAll: "pending",
+        },
+        {
+            name:    "resolvedで絞り込むとresolvedだけ返る",
+            status:  "resolved",
+            wantLen: 1,
+            wantAll: "resolved",
+        },
+        {
+            name:    "該当なしのステータスでは0件",
+            status:  "unknown",
+            wantLen: 0,
+            wantAll: "",
+        },
+    }
+
+    svc := NewContactService(contacts)
+
+    for _, tt := range tests {
+        t.Run(tt.name, func(t *testing.T) {
+            got := svc.FilterByStatus(tt.status)
+            if len(got) != tt.wantLen {
+                t.Errorf("got %d contacts, want %d", len(got), tt.wantLen)
+            }
+            for _, c := range got {
+                if c.Status != tt.wantAll {
+                    t.Errorf("got status %q, want %q", c.Status, tt.wantAll)
+                }
+            }
+        })
+    }
+}
+```
+
+**Step 4: Green**
+
+```go
+// contact_service.go
+package service
+
+type Contact struct {
+    ID     string
+    Title  string
+    Status string
+}
+
+type ContactService struct {
+    contacts []Contact
+}
+
+func NewContactService(contacts []Contact) *ContactService {
+    return &ContactService{contacts: contacts}
+}
+
+func (s *ContactService) FilterByStatus(status string) []Contact {
+    var result []Contact
+    for _, c := range s.contacts {
+        if c.Status == status {
+            result = append(result, c)
+        }
+    }
+    return result
+}
+```
+
+3つの言語で同じ機能をTDDで実装しましたが、テストの構造は同じです。Test Listを作り、1つずつRedからGreenにしていくサイクルは言語に依存しません。
+
+言語を超えた教訓: Canon TDDのTest Listは、Example MappingのExampleをそのままテスト項目に変換したものである。
+
+---
+
+## Double-Loop TDD (Freeman & Pryce, GOOS)
+
+Canon TDDは個々のユニットを保護しますが、「機能全体が動くこと」は保証しません。ここで登場するのがDouble-Loop TDDです。
+
+Steve FreemanとNat PryceがGOOS（Growing Object-Oriented Software, Guided by Tests）で提唱した手法で、**外側のループ（受け入れテスト）**と**内側のループ（ユニットテスト）**の二重構造でテストを組み立てます。
+
+### 二重ループの構造
+
+```
+Double-Loop TDD の流れ
+======================
+
+外側ループ: 受け入れテスト（機能全体が動くか？）
+┌──────────────────────────────────────────┐
+│ Red: 受け入れテストを書く（最初は失敗する）     │
+│                                            │
+│   内側ループ: ユニットテスト（部品は正しいか？）  │
+│   ┌────────────────────────────────┐       │
+│   │ Red → Green → Refactor          │       │
+│   │ Red → Green → Refactor          │       │
+│   │ Red → Green → Refactor          │       │
+│   │ ...必要な部品が全部できるまで繰り返す │       │
+│   └────────────────────────────────┘       │
+│                                            │
+│ Green: 受け入れテストが通る！                  │
+│ Refactor: 全体をきれいにする                   │
+└──────────────────────────────────────────┘
+```
+
+外側のテストは「ユーザーの視点」です。「管理者がお問い合わせ一覧ページを開いたとき、ステータスが"未対応"のものだけが表示される」というレベルの検証です。
+
+内側のテストは「開発者の視点」です。「`FilterByStatus`関数に"pending"を渡したとき、pendingのContactだけが返る」というレベルの検証です。
+
+### Python での実装例
+
+外側（受け入れテスト）から書き始めます。
+
+```python
+# tests/acceptance/test_contact_list.py
+import pytest
+from fastapi.testclient import TestClient
+from app.main import app
+
+
+@pytest.fixture
+def client():
+    return TestClient(app)
+
+
+@pytest.fixture
+def seed_contacts(db_session):
+    """テスト用データの投入"""
+    from app.models import Contact
+    contacts = [
+        Contact(id="c1", title="返金について", status="pending"),
+        Contact(id="c2", title="配送遅延", status="resolved"),
+        Contact(id="c3", title="商品不良", status="pending"),
+        Contact(id="c4", title="アカウント削除", status="in_progress"),
+    ]
+    db_session.add_all(contacts)
+    db_session.commit()
+
+
+class TestContactListAcceptance:
+    """受け入れテスト: 管理者がお問い合わせ一覧を操作する"""
+
+    def test_filter_by_pending_shows_only_pending(self, client, seed_contacts):
+        """未対応でフィルタすると、未対応のお問い合わせだけ表示される"""
+        response = client.get("/api/contacts?status=pending")
+
+        assert response.status_code == 200
+        data = response.json()["data"]
+        assert len(data) == 2
+        assert all(c["status"] == "pending" for c in data)
+        assert {c["title"] for c in data} == {"返金について", "商品不良"}
+
+    def test_empty_result_shows_message(self, client, seed_contacts):
+        """フィルタ結果が0件のとき、メッセージが返される"""
+        response = client.get("/api/contacts?status=cancelled")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["data"] == []
+        assert data["message"] == "条件に一致するお問い合わせはありません"
+```
+
+この受け入れテストは最初は失敗します（Red）。ここから内側のループに入り、必要な部品をCanon TDDで1つずつ作っていきます。
+
+```python
+# 内側ループ1: ContactService.filter_by_status のユニットテスト
+# （前のセクションで実装済み）
+
+# 内側ループ2: APIエンドポイントのユニットテスト
+# tests/test_contact_router.py
+def test_contact_list_endpoint_returns_filtered_contacts(client, mocker):
+    """APIエンドポイントがServiceの結果を正しく返すこと"""
+    mock_contacts = [
+        {"id": "c1", "title": "返金について", "status": "pending"},
+    ]
+    mocker.patch(
+        "app.routers.contact.ContactService.filter_by_status",
+        return_value=mock_contacts,
+    )
+
+    response = client.get("/api/contacts?status=pending")
+
+    assert response.status_code == 200
+    assert response.json()["data"] == mock_contacts
+```
+
+内側のユニットテストが全部通ったら、外側の受け入れテストも通るはずです（Green）。通らなければ、統合の問題があるということです。
+
+### TypeScript での実装例
+
+```typescript
+// tests/acceptance/contactList.acceptance.test.ts
+import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { setupTestServer, teardownTestServer, seedContacts } from "../helpers";
+
+describe("受け入れテスト: お問い合わせ一覧", () => {
+  let server: ReturnType<typeof setupTestServer>;
+
+  beforeAll(async () => {
+    server = await setupTestServer();
+    await seedContacts(server.db, [
+      { id: "c1", title: "返金について", status: "pending" },
+      { id: "c2", title: "配送遅延", status: "resolved" },
+      { id: "c3", title: "商品不良", status: "pending" },
+    ]);
+  });
+
+  afterAll(async () => {
+    await teardownTestServer(server);
+  });
+
+  it("未対応でフィルタすると未対応のみ表示される", async () => {
+    const response = await server.app.request("/api/contacts?status=pending");
+    const json = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(json.data).toHaveLength(2);
+    expect(json.data.every((c: any) => c.status === "pending")).toBe(true);
+  });
+
+  it("フィルタ結果が0件のときメッセージが返される", async () => {
+    const response = await server.app.request("/api/contacts?status=cancelled");
+    const json = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(json.data).toHaveLength(0);
+    expect(json.message).toBe("条件に一致するお問い合わせはありません");
+  });
+});
+```
+
+```typescript
+// 内側ループ: ContactService のユニットテスト（前セクションで実装済み）
+
+// 内側ループ2: ルーターのユニットテスト
+// tests/contactRouter.test.ts
+import { describe, it, expect, vi } from "vitest";
+import { createContactRouter } from "../src/routers/contactRouter";
+
+describe("ContactRouter", () => {
+  it("statusクエリパラメータでServiceを呼び出す", async () => {
+    const mockService = {
+      filterByStatus: vi.fn().mockReturnValue([
+        { id: "c1", title: "返金について", status: "pending" },
+      ]),
+    };
+
+    const router = createContactRouter(mockService);
+    const response = await router.request("/api/contacts?status=pending");
+    const json = await response.json();
+
+    expect(mockService.filterByStatus).toHaveBeenCalledWith("pending");
+    expect(json.data).toHaveLength(1);
+  });
+});
+```
+
+### Go での実装例
+
+```go
+// contact_acceptance_test.go
+package handler_test
+
+import (
+    "encoding/json"
+    "net/http"
+    "net/http/httptest"
+    "testing"
+
+    "myapp/handler"
+    "myapp/service"
+)
+
+func TestContactListAcceptance(t *testing.T) {
+    // テスト用のデータを用意
+    contacts := []service.Contact{
+        {ID: "c1", Title: "返金について", Status: "pending"},
+        {ID: "c2", Title: "配送遅延", Status: "resolved"},
+        {ID: "c3", Title: "商品不良", Status: "pending"},
+    }
+    svc := service.NewContactService(contacts)
+    h := handler.NewContactHandler(svc)
+
+    t.Run("未対応でフィルタすると未対応のみ返る", func(t *testing.T) {
+        req := httptest.NewRequest(http.MethodGet, "/api/contacts?status=pending", nil)
+        rec := httptest.NewRecorder()
+
+        h.ListContacts(rec, req)
+
+        if rec.Code != http.StatusOK {
+            t.Fatalf("got status %d, want %d", rec.Code, http.StatusOK)
+        }
+
+        var resp struct {
+            Data []service.Contact `json:"data"`
+        }
+        if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+            t.Fatalf("failed to unmarshal response: %v", err)
+        }
+
+        if len(resp.Data) != 2 {
+            t.Errorf("got %d contacts, want 2", len(resp.Data))
+        }
+        for _, c := range resp.Data {
+            if c.Status != "pending" {
+                t.Errorf("got status %q, want pending", c.Status)
+            }
+        }
+    })
+
+    t.Run("フィルタ結果が0件のときメッセージが返る", func(t *testing.T) {
+        req := httptest.NewRequest(http.MethodGet, "/api/contacts?status=cancelled", nil)
+        rec := httptest.NewRecorder()
+
+        h.ListContacts(rec, req)
+
+        var resp struct {
+            Data    []service.Contact `json:"data"`
+            Message string            `json:"message"`
+        }
+        if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+            t.Fatalf("failed to unmarshal response: %v", err)
+        }
+
+        if len(resp.Data) != 0 {
+            t.Errorf("got %d contacts, want 0", len(resp.Data))
+        }
+        if resp.Message != "条件に一致するお問い合わせはありません" {
+            t.Errorf("got message %q, want expected message", resp.Message)
+        }
+    })
+}
+```
+
+3つの言語でDouble-Loop TDDを実装しましたが、構造は同じです。外側で「機能として正しく動くか」を定義し、内側で「部品が正しいか」を保証する。この二重構造が、デグレを構造的に防ぎます。
+
+言語を超えた教訓: 外側のテストが「何を作ったか」を定義し、内側のテストが「どう作ったか」を保護する。この二重構造がデグレの防波堤になる。
+
+---
+
+## London School vs Chicago School の使い分け
+
+テストの書き方には2つの流派があります。London School（Mockist）とChicago School（Classicist）です。どちらが正しいという話ではなく、**レイヤーによって使い分ける**のが実践的です。
+
+### 概要
+
+| 観点 | London School | Chicago School |
+|---|---|---|
+| 別名 | Mockist | Classicist |
+| 検証対象 | 振る舞い（メッセージのやりとり） | 状態（処理後の値） |
+| モックの使用 | 積極的に使う | 最小限に抑える |
+| テストの壊れやすさ | 実装の変更で壊れやすい | 振る舞いが同じなら壊れにくい |
+| 向いている場所 | 外部依存が多い層（API, FE） | 純粋なロジック（Service, Domain） |
+| 判断基準 | **外部依存があるならLondon** | **純粋なロジックならChicago** |
+
+### Python例: pytest + mock vs pytest + factory
+
+**London School（APIエンドポイント層）**
+
+外部依存（Service層）をモックして、APIの振る舞いだけをテストします。
+
+```python
+# tests/test_contact_router_london.py
+from unittest.mock import MagicMock
+import pytest
+
+
+def test_get_contacts_calls_service_with_status(client, mocker):
+    """APIエンドポイントがServiceを正しく呼び出すこと"""
+    mock_service = MagicMock()
+    mock_service.filter_by_status.return_value = [
+        {"id": "c1", "title": "問い合わせ1", "status": "pending"},
+    ]
+    mocker.patch(
+        "app.routers.contact.get_contact_service",
+        return_value=mock_service,
+    )
+
+    response = client.get("/api/contacts?status=pending")
+
+    # 振る舞いを検証: Serviceが正しいパラメータで呼ばれたか
+    mock_service.filter_by_status.assert_called_once_with("pending")
+    assert response.status_code == 200
+
+
+def test_get_contacts_returns_404_for_nonexistent(client, mocker):
+    """存在しないcontactに対して404が返ること"""
+    mock_service = MagicMock()
+    mock_service.get_contact.side_effect = ContactNotFoundError("c999")
+    mocker.patch(
+        "app.routers.contact.get_contact_service",
+        return_value=mock_service,
+    )
+
+    response = client.get("/api/contacts/c999")
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "not found"
+```
+
+**Chicago School（Service層）**
+
+モックを使わず、実際のデータを投入して処理結果の状態を検証します。
+
+```python
+# tests/test_contact_service_chicago.py
+import pytest
+from app.services.contact_service import ContactService
+from app.models import Contact
+
+
+def test_filter_returns_only_matching_status(db_session):
+    """指定ステータスのcontactだけが返ること"""
+    db_session.add_all([
+        Contact(id="c1", title="問い合わせ1", status="pending"),
+        Contact(id="c2", title="問い合わせ2", status="resolved"),
+        Contact(id="c3", title="問い合わせ3", status="pending"),
+    ])
+    db_session.commit()
+
+    service = ContactService(db_session)
+    result = service.filter_by_status("pending")
+
+    # 状態を検証: 結果の件数と中身を確認
+    assert len(result) == 2
+    assert {c.id for c in result} == {"c1", "c3"}
+
+
+def test_filter_returns_empty_for_no_match(db_session):
+    """該当がない場合は空リストが返ること"""
+    db_session.add(Contact(id="c1", title="問い合わせ1", status="pending"))
+    db_session.commit()
+
+    service = ContactService(db_session)
+    result = service.filter_by_status("cancelled")
+
+    assert result == []
+```
+
+### TypeScript例: vi.mock() vs 実際のstateを検証
+
+**London School（APIルーター層）**
+
+```typescript
+// tests/contactRouter.london.test.ts
+import { describe, it, expect, vi } from "vitest";
+
+describe("ContactRouter - London School", () => {
+  it("Serviceを正しいパラメータで呼び出す", async () => {
+    const mockFilterByStatus = vi.fn().mockReturnValue([
+      { id: "c1", title: "問い合わせ1", status: "pending" },
+    ]);
+
+    const mockService = { filterByStatus: mockFilterByStatus };
+    const router = createContactRouter(mockService);
+
+    const response = await router.request("/api/contacts?status=pending");
+
+    // 振る舞いの検証
+    expect(mockFilterByStatus).toHaveBeenCalledWith("pending");
+    expect(mockFilterByStatus).toHaveBeenCalledTimes(1);
+    expect(response.status).toBe(200);
+  });
+
+  it("Serviceがエラーを投げたら500を返す", async () => {
+    const mockFilterByStatus = vi.fn().mockImplementation(() => {
+      throw new Error("DB connection failed");
+    });
+
+    const mockService = { filterByStatus: mockFilterByStatus };
+    const router = createContactRouter(mockService);
+
+    const response = await router.request("/api/contacts?status=pending");
+
+    expect(response.status).toBe(500);
+  });
+});
+```
+
+**Chicago School（Service層）**
+
+```typescript
+// tests/contactService.chicago.test.ts
+import { describe, it, expect } from "vitest";
+import { ContactService } from "../src/services/contactService";
+
+describe("ContactService - Chicago School", () => {
+  const contacts = [
+    { id: "c1", title: "問い合わせ1", status: "pending" as const, createdAt: new Date() },
+    { id: "c2", title: "問い合わせ2", status: "resolved" as const, createdAt: new Date() },
+    { id: "c3", title: "問い合わせ3", status: "pending" as const, createdAt: new Date() },
+  ];
+
+  it("pendingで絞り込むとpendingだけ返る", () => {
+    const service = new ContactService(contacts);
+
+    const result = service.filterByStatus("pending");
+
+    // 状態の検証: 結果の中身を直接確認
+    expect(result).toHaveLength(2);
+    expect(result.map((c) => c.id)).toEqual(["c1", "c3"]);
+  });
+
+  it("該当がない場合は空配列を返す", () => {
+    const service = new ContactService(contacts);
+
+    const result = service.filterByStatus("cancelled" as any);
+
+    expect(result).toEqual([]);
+  });
+});
+```
+
+### Go例: interface + mock vs table-driven test
+
+**London School（Handler層 / interfaceとmock）**
+
+```go
+// contact_handler_london_test.go
+package handler_test
+
+import (
+    "encoding/json"
+    "net/http"
+    "net/http/httptest"
+    "testing"
+
+    "myapp/handler"
+    "myapp/service"
+)
+
+// Serviceのinterfaceを定義（テスト用）
+type mockContactService struct {
+    filterByStatusFunc func(status string) []service.Contact
+}
+
+func (m *mockContactService) FilterByStatus(status string) []service.Contact {
+    return m.filterByStatusFunc(status)
+}
+
+func TestListContacts_CallsServiceWithStatus(t *testing.T) {
+    called := false
+    calledWith := ""
+
+    mock := &mockContactService{
+        filterByStatusFunc: func(status string) []service.Contact {
+            called = true
+            calledWith = status
+            return []service.Contact{
+                {ID: "c1", Title: "問い合わせ1", Status: "pending"},
+            }
+        },
+    }
+
+    h := handler.NewContactHandler(mock)
+    req := httptest.NewRequest(http.MethodGet, "/api/contacts?status=pending", nil)
+    rec := httptest.NewRecorder()
+
+    h.ListContacts(rec, req)
+
+    // 振る舞いの検証
+    if !called {
+        t.Error("FilterByStatus was not called")
+    }
+    if calledWith != "pending" {
+        t.Errorf("called with %q, want %q", calledWith, "pending")
+    }
+    if rec.Code != http.StatusOK {
+        t.Errorf("got status %d, want %d", rec.Code, http.StatusOK)
+    }
+}
+```
+
+**Chicago School（Service層 / table-driven test）**
+
+```go
+// contact_service_chicago_test.go
+package service
+
+import (
+    "testing"
+)
+
+func TestFilterByStatus_Chicago(t *testing.T) {
+    contacts := []Contact{
+        {ID: "c1", Title: "問い合わせ1", Status: "pending"},
+        {ID: "c2", Title: "問い合わせ2", Status: "resolved"},
+        {ID: "c3", Title: "問い合わせ3", Status: "pending"},
+    }
+
+    tests := []struct {
+        name    string
+        status  string
+        wantIDs []string
+    }{
+        {
+            name:    "pendingで絞り込むとpendingだけ返る",
+            status:  "pending",
+            wantIDs: []string{"c1", "c3"},
+        },
+        {
+            name:    "resolvedで絞り込むとresolvedだけ返る",
+            status:  "resolved",
+            wantIDs: []string{"c2"},
+        },
+        {
+            name:    "該当なしでは空スライス",
+            status:  "cancelled",
+            wantIDs: []string{},
+        },
+    }
+
+    svc := NewContactService(contacts)
+
+    for _, tt := range tests {
+        t.Run(tt.name, func(t *testing.T) {
+            got := svc.FilterByStatus(tt.status)
+
+            // 状態の検証: 結果のIDを直接確認
+            gotIDs := make([]string, len(got))
+            for i, c := range got {
+                gotIDs[i] = c.ID
+            }
+
+            if len(gotIDs) != len(tt.wantIDs) {
+                t.Errorf("got %d IDs, want %d", len(gotIDs), len(tt.wantIDs))
+                return
+            }
+            for i, id := range gotIDs {
+                if id != tt.wantIDs[i] {
+                    t.Errorf("got ID[%d]=%q, want %q", i, id, tt.wantIDs[i])
+                }
+            }
+        })
+    }
+}
+```
+
+### 使い分けの判断基準
+
+判断基準はシンプルです。
+
+| 対象の層 | 外部依存 | 推奨スタイル | 理由 |
+|---|---|---|---|
+| APIエンドポイント/Handler | あり（Service, DB） | London School | 外部依存をモックして境界だけテスト |
+| フロントエンドコンポーネント | あり（API, Store） | London School | APIレスポンスをモックしてUI動作をテスト |
+| Service/ドメインロジック | なし or 少ない | Chicago School | 実際のデータで状態を検証 |
+| ユーティリティ関数 | なし | Chicago School | 入力と出力だけ確認 |
+
+迷ったときの基準: **「外部依存があるならLondon、純粋なロジックならChicago」**。
+
+この判断基準はPythonでもTypeScriptでもGoでも同じです。
+
+言語を超えた教訓: テストスタイルの選択は「何をテストするか」で決まり、「何の言語で書くか」では決まらない。
+
+---
+
+## 言語横断の抽象原則
+
+ここまでPython、TypeScript、Goの3言語でTDDを実装してきました。最後に、言語に依存しない抽象原則を整理します。
+
+### テストの3層構造
+
+テストには3つの層があります。この構造はどの言語でも同じです。
+
+| 層 | 目的 | 粒度 | 誰の視点 |
+|---|---|---|---|
+| 受け入れテスト | 機能全体が動くか | 粗い | ユーザー |
+| ユニットテスト | 個々の部品は正しいか | 細かい | 開発者 |
+| エッジケーステスト | 境界条件や異常系は正しいか | 細かい | QAエンジニア |
+
+デグレを防ぐためには、最低限**受け入れテスト**が必要です。受け入れテストがあれば、内部の実装をリファクタリングしても「機能として壊れていないこと」を確認できます。
+
+ユニットテストは内部構造の変更を検出しますが、「機能として動くか」は保証しません。受け入れテストとユニットテストの両方があって初めて、デグレに対する十分な防波堤になります。
+
+### テストは仕様の表現
+
+Dan North（BDDの提唱者）は「テストを読めば何を作ったかわかる」と言いました。
+
+良いテストは仕様書として機能します。テストのdescriptionを読むだけで、その機能が「何を」「どういう条件で」「どう動く」かがわかります。
+
+```python
+# テストが仕様書として機能する例
+class TestContactListFilter:
+    def test_filter_by_pending_shows_only_pending(self): ...
+    def test_filter_by_resolved_shows_only_resolved(self): ...
+    def test_filter_with_no_match_shows_empty_message(self): ...
+    def test_filter_combined_with_search_narrows_results(self): ...
+    def test_default_shows_all_contacts(self): ...
+```
+
+このテストクラスのメソッド名を読むだけで、フィルタリング機能の仕様がわかります。これはExample MappingのExampleと同じ構造です。Example Mapで「何を作るか」を定義し、テストで「作ったものが正しいか」を保証する。この2つが揃ったとき、AIとの協業で「仕様齟齬」と「デグレ」の両方を構造的に防げるようになります。
+
+### AIへの指示にテスト要件を含める実践法
+
+AIにコード変更を依頼するとき、テスト要件を含めることでデグレを大幅に減らせます。
+
+**悪い指示**
+
+```
+get_contact 関数のエラーハンドリングを改善してください。
+```
+
+**良い指示**
+
+```
+get_contact 関数のエラーハンドリングを改善してください。
+
+【変更内容】
+- エラー時にdictを返す代わりに、ContactNotFoundErrorを投げるようにする
+
+【テスト要件】
+- 正常系: contactが存在するとき、dataフィールドに含めて返すこと
+- 異常系: contactが存在しないとき、ContactNotFoundErrorが発生すること
+- 受け入れ: /api/contacts/{id} エンドポイントが404を返すこと
+
+【影響範囲の確認】
+- get_contactを呼び出している箇所をプロジェクト全体から検索して、
+  全ての呼び出し元が例外をハンドリングできるようにしてください
+```
+
+この指示であれば、AIは以下を行います。
+
+1. まずテストを書く（Red）
+2. 実装を変更する（Green）
+3. 影響範囲を検索し、呼び出し元も修正する
+4. 全てのテストが通ることを確認する
+
+テスト要件と影響範囲の確認を指示に含めることで、AIが「見ていない範囲」を自分から確認しに行く動機を与えられます。
+
+言語を超えた教訓: テストは「AIへの制約」ではなく、「AIと人間が共有する仕様の言語」として機能する。
+
+---
+
+## まとめ
+
+11件のデグレから学んだことを整理します。
+
+AIは与えられた範囲のコードを誠実に修正します。しかし、コンテキスト窓に入っていないコードは存在しないのと同じです。テストがなければ、壊れたことに気づく手段がありません。
+
+Canon TDDの「Test List → Red → Green → Refactor」のサイクルは、AIに「テストを先に書いてから実装して」と伝えるだけで機能します。Example MappingのExampleがそのままTest Listになります。
+
+Double-Loop TDDの二重構造は、「機能として動くこと」と「部品が正しいこと」を分離して保証します。外側の受け入れテストがあれば、内部のリファクタリングでデグレが起きてもすぐに検出できます。
+
+London SchoolとChicago Schoolは対立するものではなく、レイヤーによって使い分けるものです。外部依存があるならLondon、純粋なロジックならChicago。この基準はPythonでもTypeScriptでもGoでも同じです。
+
+テスト戦略が決まったら、次はDay 0に品質基盤を整える話です。lintルール、型チェック、エラーハンドリングの方針をプロジェクト開始時に決めておくことで、AIが「最初から正しいコード」を書ける環境を作ります。
+
+次回は、bare exceptと型安全の問題21件を構造的に防ぐためのエラーハンドリングと型安全の設計について紹介します。
+
+---
+
+この記事は、AI開発で遭遇した78件のバグから体系化した**SFAD（Spec-First AI Development）シリーズ**の一部です。
+
+前回: AIに伝わる仕様書の書き方 ― Example Mappingで要件の「抜け漏れ」を構造的に潰す
+次回: bare except 12箇所と型安全9件 ― AIが書く「動くけど危ないコード」の見抜き方

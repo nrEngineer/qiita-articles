@@ -1,0 +1,678 @@
+---
+title: AI生成コードを「読む技術」― 5つの言語で見る品質チェックリストと見落としパターン
+tags:
+  - Python
+  - TypeScript
+  - codereview
+  - AI駆動開発
+  - ClaudeCode
+private: true
+updated_at: '2026-03-01T19:02:18+09:00'
+id: 609236d25adf4094049a
+organization_url_name: null
+slide: false
+ignorePublish: false
+---
+
+## TL;DR
+
+- AI生成コードは「見た目がきれい」なので、従来のコードレビューの手がかりが効かない
+- 5言語（Python/TS/Go/Rust/Java）共通の7つの品質チェックポイントを体系化
+- AIが生成しがちな問題パターン: **過剰な汎用化、不要な抽象化、エラーの握りつぶし、テスト不足**
+- 各パターンにコピペ可能なlintルール・検出コマンド付き
+- 「動くけど危ない」コードを見抜くレビュー視点が身につく
+
+## この記事でできること
+
+| やりたいこと | この記事で得られるもの |
+|---|---|
+| AIコードのレビュー観点を知りたい | 7つの品質チェックポイント |
+| 問題パターンを言語別に知りたい | 5言語の具体例とBefore/After |
+| レビューの効率を上げたい | 優先順位付きチェックリスト |
+| チームに展開できる基準が欲しい | レビューガイドライン |
+
+---
+
+AIが書いたコードをそのままマージしていませんか？
+
+私はしていました。動くし、テストも通るし、見た目もきれい。「AIが書いたんだから大丈夫だろう」と思ってマージして、あとから問題が出てきて直す。それを繰り返していました。
+
+この記事は、その経験から作った「AI生成コードを読むときのチェックリスト」の話です。Python、TypeScript、Go、Rust、Javaの5つの言語で、AIが生成しがちな問題パターンを具体的に示します。
+
+## なぜAI生成コードのレビューは難しいのか
+
+人間が書いたコードのレビューには、長年のノウハウがあります。インデントの乱れ、命名の不統一、ネストの深さ。こうした「見た目の違和感」が手がかりになります。
+
+AI生成コードには、この手がかりがほとんどありません。
+
+**文法的に正しい。** コンパイルエラーも構文エラーもない。フォーマッタを通したかのように整っている。
+
+**パターンに沿っている。** プロジェクトの既存コードと似たスタイルで書かれている。変数名も関数名もそれらしい。
+
+**でも「ビジネスコンテキスト」を理解していない。** 「このエラーはユーザーに通知すべきか、ログに記録すべきか、握りつぶしてよいか」という判断は、ビジネス要件を知らなければできません。AIはコードの書き方は知っていますが、そのコードが動く文脈を知りません。
+
+つまり、AI生成コードのレビューは「コードの見た目」ではなく「コードの意味」を読む行為です。そしてそれは、人間が書いたコードのレビューよりも難しい作業です。見た目が整っている分、問題に気づきにくいからです。
+
+---
+
+## 5つの品質チェックポイント
+
+78個のバグを分析した経験から、AI生成コードで特に見落としやすい5つのポイントを整理しました。各ポイントについて、5つの言語での具体例を示します。
+
+---
+
+### チェックポイント1: エラーハンドリング ― 「エラーを隠す」パターン
+
+AIは「動くコード」を生成することに最適化されています。そのため、エラーが起きても処理を続行するコードを書きがちです。エラーを握りつぶすパターンは言語ごとに形が違いますが、結果は同じです。「何が起きたかわからない」状態になります。
+
+#### Python: bare except
+
+```python
+# AIが生成しがちなパターン
+def fetch_user_data(user_id: int) -> dict:
+    try:
+        response = api_client.get(f"/users/{user_id}")
+        return response.json()
+    except:                                    # 全ての例外を握りつぶす
+        return {}
+
+# あるべき姿
+def fetch_user_data(user_id: int) -> dict:
+    try:
+        response = api_client.get(f"/users/{user_id}")
+        response.raise_for_status()
+        return response.json()
+    except httpx.HTTPStatusError as e:
+        logger.warning("ユーザーデータの取得に失敗", extra={"user_id": user_id, "status": e.response.status_code})
+        raise
+    except httpx.RequestError as e:
+        logger.error("APIリクエストエラー", extra={"user_id": user_id, "error": str(e)})
+        raise
+```
+
+#### TypeScript: 空のcatchブロック
+
+```typescript
+// AIが生成しがちなパターン
+async function loadConfig(): Promise<AppConfig> {
+  try {
+    const raw = await fs.readFile("config.json", "utf-8");
+    return JSON.parse(raw);
+  } catch {
+    return {};                                 // パースエラーも権限エラーも区別しない
+  }
+}
+
+// あるべき姿
+async function loadConfig(): Promise<AppConfig> {
+  try {
+    const raw = await fs.readFile("config.json", "utf-8");
+    return JSON.parse(raw) as AppConfig;
+  } catch (error) {
+    if (error instanceof SyntaxError) {
+      throw new ConfigError(`config.json のフォーマットが不正です: ${error.message}`);
+    }
+    throw new ConfigError(`config.json の読み込みに失敗しました: ${String(error)}`);
+  }
+}
+```
+
+#### Go: エラーの無視
+
+```go
+// AIが生成しがちなパターン
+func ReadConfig(path string) Config {
+    data, _ := os.ReadFile(path)               // エラーを捨てている
+    var cfg Config
+    json.Unmarshal(data, &cfg)                 // ここも捨てている
+    return cfg
+}
+
+// あるべき姿
+func ReadConfig(path string) (Config, error) {
+    data, err := os.ReadFile(path)
+    if err != nil {
+        return Config{}, fmt.Errorf("設定ファイルの読み込みに失敗 %s: %w", path, err)
+    }
+    var cfg Config
+    if err := json.Unmarshal(data, &cfg); err != nil {
+        return Config{}, fmt.Errorf("設定ファイルのパースに失敗 %s: %w", path, err)
+    }
+    return cfg, nil
+}
+```
+
+#### Rust: unwrap()の乱用
+
+```rust
+// AIが生成しがちなパターン
+fn read_config(path: &str) -> Config {
+    let data = std::fs::read_to_string(path).unwrap();   // panicする
+    serde_json::from_str(&data).unwrap()                  // ここもpanicする
+}
+
+// あるべき姿
+fn read_config(path: &str) -> Result<Config, ConfigError> {
+    let data = std::fs::read_to_string(path)
+        .map_err(|e| ConfigError::ReadFailed { path: path.to_string(), source: e })?;
+    let config: Config = serde_json::from_str(&data)
+        .map_err(|e| ConfigError::ParseFailed { path: path.to_string(), source: e })?;
+    Ok(config)
+}
+```
+
+#### Java: 広すぎるcatch
+
+```java
+// AIが生成しがちなパターン
+public Config loadConfig(String path) {
+    try {
+        String content = Files.readString(Path.of(path));
+        return objectMapper.readValue(content, Config.class);
+    } catch (Exception e) {                    // あらゆる例外を握りつぶす
+        return new Config();
+    }
+}
+
+// あるべき姿
+public Config loadConfig(String path) throws ConfigException {
+    try {
+        String content = Files.readString(Path.of(path));
+        return objectMapper.readValue(content, Config.class);
+    } catch (NoSuchFileException e) {
+        throw new ConfigException("設定ファイルが見つかりません: " + path, e);
+    } catch (JsonProcessingException e) {
+        throw new ConfigException("設定ファイルのパースに失敗しました: " + path, e);
+    } catch (IOException e) {
+        throw new ConfigException("設定ファイルの読み込みに失敗しました: " + path, e);
+    }
+}
+```
+
+**レビューで確認すべきこと:**
+- [ ] catchブロックで例外の種類を区別しているか
+- [ ] エラー情報がログに記録されているか
+- [ ] 呼び出し元がエラーを適切に処理できる状態になっているか
+
+**言語を超えた教訓**: 「エラーを握りつぶす」書き方は言語ごとに違いますが、「問題を隠す」という結果は同じです。
+
+---
+
+### チェックポイント2: 型の厳密さ ― 「型を緩める」パターン
+
+AIは、型の制約をゆるくすることで「とりあえず動く」コードを生成することがあります。型が緩いコードは、コンパイル時には問題が出ず、実行時に初めてエラーになります。
+
+#### Python: `Any`の乱用
+
+```python
+# AIが生成しがちなパターン
+from typing import Any
+
+def transform_data(data: Any) -> Any:
+    return {"id": data["id"], "name": data["name"]}    # KeyErrorの可能性
+
+# あるべき姿
+from dataclasses import dataclass
+
+@dataclass
+class UserInput:
+    id: int
+    name: str
+
+@dataclass
+class UserOutput:
+    id: int
+    name: str
+
+def transform_data(data: UserInput) -> UserOutput:
+    return UserOutput(id=data.id, name=data.name)
+```
+
+#### TypeScript: `any`の乱用
+
+```typescript
+// AIが生成しがちなパターン
+function processEvent(event: any): any {
+  return { type: event.type, payload: event.data.payload };
+}
+
+// あるべき姿
+interface AppEvent {
+  type: string;
+  data: { payload: Record<string, unknown> };
+}
+
+interface ProcessedEvent {
+  type: string;
+  payload: Record<string, unknown>;
+}
+
+function processEvent(event: AppEvent): ProcessedEvent {
+  return { type: event.type, payload: event.data.payload };
+}
+```
+
+#### Go: `interface{}`の乱用
+
+```go
+// AIが生成しがちなパターン
+func ProcessRequest(data interface{}) interface{} {
+    m := data.(map[string]interface{})         // panicの可能性
+    return m["result"]
+}
+
+// あるべき姿
+type Request struct {
+    Result string `json:"result"`
+}
+
+type Response struct {
+    Value string `json:"value"`
+}
+
+func ProcessRequest(req Request) Response {
+    return Response{Value: req.Result}
+}
+```
+
+#### Rust: `dyn Any`と不必要なBox
+
+```rust
+// AIが生成しがちなパターン
+use std::any::Any;
+
+fn process(data: Box<dyn Any>) -> Box<dyn Any> {
+    let value = data.downcast_ref::<String>().unwrap();
+    Box::new(value.to_uppercase())
+}
+
+// あるべき姿
+fn process(data: &str) -> String {
+    data.to_uppercase()
+}
+```
+
+#### Java: `Object`型と生の型
+
+```java
+// AIが生成しがちなパターン
+public Object processData(Object input) {
+    Map data = (Map) input;                    // ClassCastExceptionの可能性
+    return data.get("result");
+}
+
+// あるべき姿
+public record ProcessedData(String result) {}
+
+public ProcessedData processData(RequestData input) {
+    return new ProcessedData(input.result());
+}
+```
+
+**レビューで確認すべきこと:**
+- [ ] `Any`/`any`/`interface{}`/`Object`が使われていないか
+- [ ] 型アサーション（キャスト）が安全に行われているか
+- [ ] 入出力の型が具体的に定義されているか
+
+**言語を超えた教訓**: 型を緩めるコードは、型システムが提供する安全性を自ら放棄する行為です。
+
+---
+
+### チェックポイント3: ログ出力 ― print文 vs 構造化ログ
+
+AIはデバッグのために`print`系の出力を使いがちです。開発中はそれで十分ですが、本番環境では構造化ログが必要です。
+
+#### 各言語のprint問題と構造化ログ
+
+| 言語 | デバッグ出力（NG） | 構造化ログ（OK） | 推奨ライブラリ |
+|------|-------------------|------------------|---------------|
+| Python | `print()` | `logger.info()` | 標準logging / structlog |
+| TypeScript | `console.log()` | `logger.info()` | pino / winston |
+| Go | `fmt.Println()` | `slog.Info()` | 標準slog |
+| Rust | `println!()` | `tracing::info!()` | tracing |
+| Java | `System.out.println()` | `logger.info()` | SLF4J + Logback |
+
+```python
+# NG: print
+print(f"ユーザー作成: {user_id}")
+
+# OK: 構造化ログ
+logger.info("ユーザーを作成しました", extra={"user_id": user_id, "email": email})
+```
+
+```typescript
+// NG: console.log
+console.log("order created:", orderId);
+
+// OK: 構造化ログ
+logger.info({ orderId, userId }, "注文を作成しました");
+```
+
+```go
+// NG: fmt.Println
+fmt.Println("order created:", orderID)
+
+// OK: 構造化ログ
+slog.Info("注文を作成しました", slog.String("order_id", orderID), slog.String("user_id", userID))
+```
+
+```rust
+// NG: println!
+println!("order created: {}", order_id);
+
+// OK: 構造化ログ
+tracing::info!(order_id = %order_id, user_id = %user_id, "注文を作成しました");
+```
+
+```java
+// NG: System.out.println
+System.out.println("order created: " + orderId);
+
+// OK: 構造化ログ
+logger.info("注文を作成しました orderId={} userId={}", orderId, userId);
+```
+
+**レビューで確認すべきこと:**
+- [ ] `print`/`console.log`/`fmt.Println`/`println!`/`System.out.println`が残っていないか
+- [ ] ログにコンテキスト情報（ID、ステータスなど）が含まれているか
+- [ ] 機密情報（パスワード、トークン）がログに含まれていないか
+
+**言語を超えた教訓**: デバッグ出力と本番ログは目的が違います。ツールで機械的に分離すべきです。
+
+---
+
+### チェックポイント4: セキュリティ ― 言語に依存しない共通脆弱性
+
+AIは「機能を動かすこと」を優先するため、セキュリティ上の考慮が抜けることがあります。特に以下の3つは、言語に関係なく頻出します。
+
+#### SQLインジェクション
+
+```python
+# NG: 文字列結合でクエリを組み立てる
+def search_users(name: str):
+    query = f"SELECT * FROM users WHERE name = '{name}'"
+    return db.execute(query)
+
+# OK: パラメータバインディング
+def search_users(name: str):
+    return db.execute("SELECT * FROM users WHERE name = :name", {"name": name})
+```
+
+```typescript
+// NG
+const users = await db.query(`SELECT * FROM users WHERE name = '${name}'`);
+
+// OK
+const users = await db.query("SELECT * FROM users WHERE name = $1", [name]);
+```
+
+```go
+// NG
+rows, _ := db.Query("SELECT * FROM users WHERE name = '" + name + "'")
+
+// OK
+rows, err := db.QueryContext(ctx, "SELECT * FROM users WHERE name = $1", name)
+```
+
+#### XSS（クロスサイトスクリプティング）
+
+```typescript
+// NG: ユーザー入力をそのままHTMLに埋め込む
+function renderComment(comment: string): string {
+  return `<div class="comment">${comment}</div>`;
+}
+
+// OK: エスケープ処理を行う（フレームワークのテンプレートエンジンを使う）
+function CommentComponent({ comment }: { comment: string }) {
+  return <div className="comment">{comment}</div>;  // Reactは自動エスケープ
+}
+```
+
+```go
+// NG
+fmt.Fprintf(w, "<div>%s</div>", userInput)
+
+// OK
+import "html/template"
+tmpl := template.Must(template.New("").Parse("<div>{{.}}</div>"))
+tmpl.Execute(w, userInput)  // html/templateは自動エスケープ
+```
+
+#### 入力サニタイズの不足
+
+```python
+# NG: ユーザー入力をそのままファイルパスに使う
+def download_file(filename: str):
+    path = f"/uploads/{filename}"              # ../../../etc/passwdが可能
+    return open(path, "rb").read()
+
+# OK: パスの正規化と検証
+import os
+
+def download_file(filename: str):
+    safe_name = os.path.basename(filename)     # ディレクトリトラバーサルを防止
+    path = os.path.join("/uploads", safe_name)
+    resolved = os.path.realpath(path)
+    if not resolved.startswith("/uploads/"):
+        raise ValueError("不正なファイルパスです")
+    return open(resolved, "rb").read()
+```
+
+**レビューで確認すべきこと:**
+- [ ] ユーザー入力がSQL文に直接結合されていないか
+- [ ] ユーザー入力がHTMLにエスケープなしで出力されていないか
+- [ ] ファイルパスにユーザー入力が含まれる場合、パストラバーサル対策があるか
+- [ ] 認証・認可のチェックが適切な場所で行われているか
+
+**言語を超えた教訓**: セキュリティの脆弱性は言語に依存しません。「ユーザー入力を信用しない」という原則は全ての言語に共通します。
+
+---
+
+### チェックポイント5: テスト可能性 ― テストしにくいコードの兆候
+
+AIが生成するコードは、「動くこと」は保証しますが、「テストしやすいこと」は保証しません。以下のパターンが見られたら、テスト可能性に問題があります。
+
+#### 密結合: 外部依存がハードコードされている
+
+```python
+# NG: 外部APIクライアントが関数内で直接生成されている
+def get_weather(city: str) -> dict:
+    client = httpx.Client()                    # テスト時に差し替えられない
+    response = client.get(f"https://api.weather.com/v1/{city}")
+    return response.json()
+
+# OK: 依存を外から注入する
+def get_weather(city: str, client: httpx.Client) -> dict:
+    response = client.get(f"https://api.weather.com/v1/{city}")
+    return response.json()
+```
+
+```typescript
+// NG: fetchが直接呼ばれている
+async function getWeather(city: string): Promise<WeatherData> {
+  const response = await fetch(`https://api.weather.com/v1/${city}`);
+  return response.json();
+}
+
+// OK: HTTPクライアントを注入可能にする
+async function getWeather(
+  city: string,
+  fetcher: typeof fetch = fetch
+): Promise<WeatherData> {
+  const response = await fetcher(`https://api.weather.com/v1/${city}`);
+  return response.json();
+}
+```
+
+```go
+// NG: http.DefaultClientに依存
+func GetWeather(city string) (*WeatherData, error) {
+    resp, err := http.Get("https://api.weather.com/v1/" + city)
+    // ...
+}
+
+// OK: HTTPクライアントを注入
+type WeatherService struct {
+    client *http.Client
+    baseURL string
+}
+
+func (s *WeatherService) GetWeather(ctx context.Context, city string) (*WeatherData, error) {
+    req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.baseURL+"/"+city, nil)
+    if err != nil {
+        return nil, fmt.Errorf("リクエスト作成に失敗: %w", err)
+    }
+    resp, err := s.client.Do(req)
+    // ...
+}
+```
+
+#### グローバル状態: テスト間で状態が漏れる
+
+```python
+# NG: グローバル変数に状態を持つ
+_cache = {}
+
+def get_user(user_id: int) -> User:
+    if user_id in _cache:
+        return _cache[user_id]
+    user = db.query(User).get(user_id)
+    _cache[user_id] = user
+    return user
+
+# OK: クラスに状態を閉じ込める
+class UserRepository:
+    def __init__(self, db: Database):
+        self._db = db
+        self._cache: dict[int, User] = {}
+
+    def get(self, user_id: int) -> User:
+        if user_id in self._cache:
+            return self._cache[user_id]
+        user = self._db.query(User).get(user_id)
+        self._cache[user_id] = user
+        return user
+```
+
+#### 副作用: 戻り値以外に世界を変える
+
+```java
+// NG: メソッド内でメール送信とDB更新が混在
+public OrderResult placeOrder(OrderRequest request) {
+    Order order = orderRepository.save(request.toOrder());
+    emailService.send(order.getUserEmail(), "ご注文を承りました");
+    inventoryService.decrementStock(order.getItems());
+    return new OrderResult(order.getId());
+}
+
+// OK: 副作用を分離する
+public Order createOrder(OrderRequest request) {
+    return orderRepository.save(request.toOrder());
+}
+
+// 副作用は呼び出し元で明示的に実行
+public OrderResult placeOrder(OrderRequest request) {
+    Order order = createOrder(request);
+    eventBus.publish(new OrderCreatedEvent(order));  // 非同期で副作用を処理
+    return new OrderResult(order.getId());
+}
+```
+
+**レビューで確認すべきこと:**
+- [ ] 外部依存（DB、API、ファイルシステム）が注入可能になっているか
+- [ ] グローバル変数やシングルトンに状態を持っていないか
+- [ ] 1つの関数に複数の副作用が混在していないか
+
+**言語を超えた教訓**: テストしにくいコードは、設計の問題です。AIはテスト可能性を自ら意識しません。
+
+---
+
+## AIコードレビューチェックリスト（15項目）
+
+上記の5つのチェックポイントを、日々のレビューで使える15項目のチェックリストにまとめました。言語に依存しない、汎用的なリストです。
+
+### エラーハンドリング（3項目）
+- [ ] **E-1**: 例外/エラーの種類を区別しているか（bare except / empty catch / `_ = err` がないか）
+- [ ] **E-2**: エラー情報がログに記録されているか（エラーメッセージ、発生箇所、コンテキスト）
+- [ ] **E-3**: 呼び出し元がエラーを適切に処理できる状態になっているか（握りつぶしていないか）
+
+### 型の厳密さ（3項目）
+- [ ] **T-1**: `Any`/`any`/`interface{}`/`Object`/`dyn Any` が使われていないか
+- [ ] **T-2**: 型アサーション（ダウンキャスト）が安全に行われているか
+- [ ] **T-3**: 関数の入出力の型が具体的に定義されているか
+
+### ログ出力（3項目）
+- [ ] **L-1**: `print`/`console.log`/`fmt.Println`/`println!`/`System.out.println` が残っていないか
+- [ ] **L-2**: ログにコンテキスト情報（ID、ステータス、操作内容）が含まれているか
+- [ ] **L-3**: 機密情報（パスワード、トークン、個人情報）がログに含まれていないか
+
+### セキュリティ（3項目）
+- [ ] **S-1**: ユーザー入力がSQL/コマンドに直接結合されていないか
+- [ ] **S-2**: ユーザー入力がHTMLにエスケープなしで出力されていないか
+- [ ] **S-3**: ファイル操作でパストラバーサル対策があるか
+
+### テスト可能性（3項目）
+- [ ] **D-1**: 外部依存（DB、API、ファイルシステム）が注入可能になっているか
+- [ ] **D-2**: グローバル変数やシングルトンに可変状態を持っていないか
+- [ ] **D-3**: 1つの関数に複数の副作用が混在していないか
+
+### 使い方の提案
+
+全項目を毎回チェックする必要はありません。以下の優先度で使うのが現実的です。
+
+| 優先度 | 項目 | 理由 |
+|--------|------|------|
+| 必須 | E-1, L-1, S-1 | 最も頻出し、最も影響が大きい |
+| 推奨 | E-2, T-1, L-3, S-2 | 本番環境で問題になりやすい |
+| 可能なら | その他全て | 品質を高めるが、緊急性は低い |
+
+---
+
+## AIは優秀なインターンである
+
+ここまで書いてきた5つのチェックポイントに共通するのは、「コードの構文は正しいが、コンテキストが欠けている」という問題です。
+
+これは、優秀なインターンと似ています。
+
+インターンは、プログラミング言語の文法を知っています。フレームワークの使い方も知っています。与えられたタスクに対して、動くコードを書けます。
+
+でも、「このサービスは決済を扱うからエラーハンドリングは特に慎重にすべき」とか、「このログは運用チームが監視に使うから構造化すべき」とか、「このAPIは外部に公開するからSQLインジェクション対策は必須」といった、プロジェクト固有のコンテキストは知りません。
+
+**レビューとは、このコンテキストを補完する行為です。**
+
+AIが書いたコードを読むとき、私たちが確認すべきなのは「文法が正しいか」ではありません。「このコードが動く文脈において、適切な判断がなされているか」です。
+
+それは言い換えると、以下の3つの問いに答える作業です。
+
+1. **このコードが失敗したとき、何が起きるか？** （エラーハンドリング）
+2. **このコードが扱うデータは、どこから来てどこへ行くか？** （型安全・セキュリティ）
+3. **このコードを半年後に修正するとき、何が困るか？** （テスト可能性・ログ）
+
+---
+
+## レビューの先にあるもの: 品質を「作り込む」
+
+ここまでの話は「レビューでどう品質を確認するか」でした。でも、レビューは最終防衛ラインです。理想は、レビュー以前の段階で品質を作り込むことです。
+
+では、どうすれば「レビューで毎回同じ指摘をする」という状態から脱却できるのか。
+
+**仕組みで防げるものは、仕組みで防ぐ。**
+
+- print残留 → lintルール（ruff T201, ESLint no-console, forbidigo）
+- bare except → lintルール（ruff E722, errcheck）
+- 型の曖昧さ → strict mode（mypy --strict, tsconfig strict, go vet）
+- セキュリティ → SAST（静的解析セキュリティツール）
+
+これらを開発開始時点で導入しておけば、レビューで指摘する項目は大幅に減ります。レビューをより本質的な「コンテキストの補完」に集中できるようになります。
+
+**仕組みで防げないものは、仕様で明示する。**
+
+- 仕様齟齬 → 実装前にExample Mappingで要件を構造化する
+- テスト可能性 → アーキテクチャ方針を仕様に含める
+- ビジネスロジック → 業務ルールをテストケースとして事前に定義する
+
+次回の記事では、この「仕様で明示する」アプローチの中核であるExample Mappingについて、実践的な使い方を書く予定です。
+
+---
+
+この記事はSFAD（Spec-First AI Development）シリーズの一部です。

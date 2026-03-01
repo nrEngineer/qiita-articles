@@ -1,0 +1,29 @@
+name: Qiita Scheduled Publish
+
+on:
+  # 毎日 UTC 22:00 = JST 07:00 に実行
+  schedule:
+    - cron: '0 22 * * *'
+  # 手動実行も可能
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Run scheduled publish
+        env:
+          QIITA_TOKEN: ${{ secrets.QIITA_TOKEN }}
+        run: bash scripts/scheduled-publish.sh
