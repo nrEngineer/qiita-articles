@@ -1,5 +1,5 @@
 {
-  "description": "Qiita記事の予約投稿スケジュール。publish_date の朝7時(JST)に自動公開される。",
+  "description": "Qiita記事の予約投稿スケジュール。publish_date の朝7時(JST)に自動公開される。2026-04-23 より週2投稿 (月・木) へ移行。",
   "articles": [
     { "file": "article-04-qiita.md", "publish_date": "2026-03-02", "title": "テスト不足でデグレ11回。Double-Loop TDD" },
     { "file": "article-02-qiita.md", "publish_date": "2026-03-09", "title": "AI生成コードを「読む技術」" },
@@ -9,11 +9,20 @@
     { "file": "article-05-qiita.md", "publish_date": "2026-04-06", "title": "エラーを「握りつぶす」コードの見抜き方" },
     { "file": "article-01-qiita.md", "publish_date": "2026-04-13", "title": "AIと開発して78個のバグを踏んだので全部分類した" },
     { "file": "article-entry-solo-qiita.md", "publish_date": "2026-04-20", "title": "Claude CodeとTDDを組み合わせたら" },
+    { "file": "article-11-qiita.md", "publish_date": "2026-04-23", "title": "AIに6000行のPRを書かせたら認可がゼロだった ― AIレビュアーも見逃した10個の地雷" },
     { "file": "article-entry-zero-quality-qiita.md", "publish_date": "2026-04-27", "title": "品質基盤ゼロのチームを引き受けた新任TLへ" },
+    { "file": "article-12-qiita.md", "publish_date": "2026-04-30", "title": "テストファイルの中で本番ロジックを再実装していた話 ― 偽物テストの見抜き方" },
     { "file": "article-07-qiita-digest.md", "publish_date": "2026-05-04", "title": "78バグから導いた7つの設計原則（ダイジェスト版）" },
+    { "file": "article-b1-4files-qiita.md", "publish_date": "2026-05-07", "title": "仕様書を4ファイルに分けたらAIが迷わなくなった ― SFAD cycle 8 Phase 構成" },
     { "file": "article-08-qiita-digest.md", "publish_date": "2026-05-11", "title": "SFADの全6コマンド設計思想（ダイジェスト版）" },
+    { "file": "article-b2-attacker-qiita.md", "publish_date": "2026-05-14", "title": "AIに攻撃者視点を持たせる Three Amigos 4視点 ― OWASPを先制する仕様化" },
     { "file": "article-09-qiita-digest.md", "publish_date": "2026-05-18", "title": "Claude Code Skillの作り方（ダイジェスト版）" },
+    { "file": "article-b3-13rules-qiita.md", "publish_date": "2026-05-21", "title": "13項目の実装ルール ― AIが破る罠リスト" },
     { "file": "article-entry-ai-proposal-qiita.md", "publish_date": "2026-05-25", "title": "AI導入提案が通らない理由と、データで語って通す方法" },
-    { "file": "article-10-qiita.md", "publish_date": "2026-06-01", "title": "AI時代の開発ワークフロー実践ロードマップ" }
+    { "file": "article-b4-threat-qiita.md", "publish_date": "2026-05-28", "title": "Threat Modeling をAIと自動化する ― threat.md 入門" },
+    { "file": "article-10-qiita.md", "publish_date": "2026-06-01", "title": "AI時代の開発ワークフロー実践ロードマップ" },
+    { "file": "article-b5-resilience-qiita.md", "publish_date": "2026-06-04", "title": "Resilience Modeling ― 障害シナリオを仕様に書く" },
+    { "file": "article-b7-cycle-walkthrough-qiita.md", "publish_date": "2026-06-08", "title": "新SFAD cycle の 8 Phase を一周した記録 ― 認証機能を題材に" },
+    { "file": "article-b6-n1-reverse-qiita.md", "publish_date": "2026-06-11", "title": "既存コードから N+1 を仕様化する ― reverse 9タグ活用ガイド" }
   ]
 }
